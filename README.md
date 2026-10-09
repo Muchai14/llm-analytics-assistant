@@ -49,3 +49,7 @@ Ask questions about a database in plain English. The system uses an LLM to conve
 ## Error handling
 
 If a question cannot be answered with the available data, the system returns an error instead of inventing data.
+
+## Demo
+
+Watch a 2-minute demo: [demo.mov](demo.mov)
