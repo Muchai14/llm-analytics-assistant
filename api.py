@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import chromadb
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -18,15 +19,55 @@ Columns:
   order_date (TEXT)
 """
 
+# Initialize ChromaDB and build context
+chroma_client = chromadb.Client()
+collection = chroma_client.get_or_create_collection(name="orders_context")
+
+def build_context():
+    """Load all rows from orders into the vector store"""
+    global collection
+    try:
+        chroma_client.delete_collection(name="orders_context")
+    except Exception:
+        pass
+    collection = chroma_client.get_or_create_collection(name="orders_context")
+
+    rows = conn.execute("SELECT * FROM orders").fetchall()
+    documents = []
+    ids = []
+    for row in rows:
+        order_id, customer_id, product, amount, order_date = row
+        text = f"Order {order_id}: customer {customer_id} bought {product} for ${amount} on {order_date}."
+        documents.append(text)
+        ids.append(f"order_{order_id}")
+
+    if documents:
+        collection.add(documents=documents, ids=ids)
+
+def retrieve_context(question: str, n_results: int = 3):
+    """Retrieve relevant rows as context"""
+    try:
+        results = collection.query(query_texts=[question], n_results=n_results)
+        return results['documents'][0] if results['documents'] else []
+    except Exception:
+        return []
+
+# Build context at startup
+build_context()
+
 app = FastAPI(title="LLM Analytics Assistant")
 
 class Query(BaseModel):
     question: str
 
-def nl_to_sql(question: str) -> str:
-    """Convert natural language question to SQL"""
+def nl_to_sql(question: str, context: list) -> str:
+    """Convert natural language question to SQL using schema + retrieved context"""
+    context_text = "\n".join(context) if context else "No additional context."
     prompt = f"""You are a SQL expert. Given this database schema:
 {SCHEMA}
+
+Here is some relevant data from the database to help you understand the content:
+{context_text}
 
 Write a SQL query to answer this question: {question}
 
@@ -36,7 +77,6 @@ Rules:
 - Always end with a semicolon.
 - If the question CANNOT be answered using ONLY the tables and columns in the schema above, return exactly: SELECT 'ERROR: question cannot be answered';
 - Do NOT invent data, columns, or tables that are not in the schema.
-- Do NOT write queries that return placeholder data like 'Unknown'.
 """
     response = client.chat.completions.create(
         model="openai/gpt-oss-120b",
@@ -46,7 +86,6 @@ Rules:
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    """Serve a simple web UI"""
     return """
     <html>
     <head>
@@ -92,9 +131,9 @@ def home():
 
 @app.post("/ask")
 def ask(q: Query):
-    """API endpoint: takes a question, returns SQL and result"""
     try:
-        sql = nl_to_sql(q.question)
+        context = retrieve_context(q.question)
+        sql = nl_to_sql(q.question, context)
     except Exception as e:
         return {"error": f"LLM failed to generate SQL: {str(e)}"}
 
@@ -110,7 +149,8 @@ def ask(q: Query):
         return {
             "question": q.question,
             "sql": sql,
-            "result": result
+            "result": result,
+            "context_used": context
         }
     except Exception as e:
         return {
